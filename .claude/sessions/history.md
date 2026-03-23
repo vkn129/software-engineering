@@ -1437,3 +1437,56 @@ Also need to update the restore script to remove the >20 line filter:
 Now regenerate history.md with all sessions including the small one and thinking blocks:
 
 
+---
+## Session 059a317d — 2026-03-23 (06:02 to 06:37 UTC)
+
+**Files touched:** `README.md`, `binary_tree.py`, `practice.py`
+
+### 06:02 — User
+resume
+
+### 06:05 — Claude
+Got it — no permission prompts, I'll write everything directly.
+
+Here's where we are:
+
+**Phase 1 (Days 1-14): Mathematical Foundations** — COMPLETE
+**Phase 2 (Days 15-35): Linear Data Structures** — COMPLETE
+**Phase 3 (Days 36-63): Trees** — NOT STARTED (folders exist but empty)
+
+Starting Phase 3 now with **Day 36: Binary Tree Fundamentals**. Let me build the content.
+
+### 06:05 — Claude
+`★ Insight ─────────────────────────────────────`
+**Phase 3: Trees** is where DSA shifts from linear thinking to hierarchical thinking. Trees are the backbone of databases (B-trees), compilers (ASTs), file systems, and network routing. The key mental shift: instead of scanning left-to-right, you now think in terms of recursive subproblems — every tree operation decomposes into "do something with r ...
+
+### 06:30 — Claude
+`★ Insight ─────────────────────────────────────`
+**The recursive definition of trees is why they're the gateway to divide-and-conquer thinking.** Every tree problem has the same skeleton: base case (empty/leaf), recursive case (combine results from left and right subtrees). Once you internalize this pattern, problems like "find max depth" and "check if balanced" become trivially expressible.
+`─── ...
+
+### 06:31 — Claude
+Now the practice file with exercises for you to implement.
+
+### 06:32 — Claude
+Let me verify everything runs.
+
+### 06:35 — Claude
+Small bug in the flatten test — the fallback logic needs fixing.
+
+### 06:35 — Claude
+The fallback detection isn't working. Let me fix this properly — the issue is that `flatten_to_linked_list` is `None` (the function returns `pass` which is `None`), but the function object itself exists.
+
+### 06:35 — Claude
+All 25 tests pass. Now let me continue building the remaining days of Week 6 in parallel.
+
+### 06:37 — Claude
+5 background agents launched building **Days 37-42** (Week 6: Binary Trees) in parallel:
+
+| Day | Topic | Status |
+|-----|-------|--------|
+| 36 | Binary Tree Fundamentals | **DONE** (traversals, properties, 7 practice exercises) |
+| 37 | Tree Construction — from traversals, serialize/deserialize | Building... |
+| 38 | Lowest Common Ancestor — git merge-base, recursive + binary lifting | Building. ...
+
+

@@ -1,172 +1,116 @@
-# Day 14: Hash Tables Part 2 -- Open Addressing and Resize
+# Day 66: Load Factor and Rehashing
 
 ## Why This Exists
 
-Yesterday you learned chaining: each bucket holds a linked list of colliding entries. It works, but it has a cost -- every entry is a heap-allocated node with a pointer overhead, and traversing chains means jumping through scattered memory addresses. On modern CPUs where a cache miss costs 100+ cycles, those pointer chases are expensive.
+You have a hash table. You chose a size — say, 16 buckets. You start inserting items. At first, collisions are rare and everything is fast. But as the table fills up, collisions become frequent, chains grow longer, and your O(1) lookups degrade toward O(n). The question becomes: **when do you resize, and how?**
 
-Open addressing takes a fundamentally different approach: store everything directly in the array. When a collision occurs, you probe -- you look at the next slot, or the slot after that, following a deterministic sequence until you find an empty one. No linked lists, no heap allocation per entry, no pointer chasing. The data sits in contiguous memory, and the CPU's cache prefetcher is happy.
+This is the load factor problem, and the answer has deep implications for both correctness and performance. Every production hash map — Python's `dict`, Java's `HashMap`, Go's `map`, Redis's hash tables — implements automatic resizing. Understanding the mechanics reveals why hash tables deliver amortized O(1) despite occasional expensive operations, and why naive implementations can cause latency spikes that crash production systems.
 
-This is not academic preference. Python's dict uses open addressing. So does Rust's HashMap, Go's map, and most high-performance hash table implementations. Google's Swiss Table (absl::flat_hash_map), which is considered the state-of-the-art hash table, uses open addressing with SIMD instructions to probe 16 slots simultaneously. When you profile real systems, cache behavior dominates, and open addressing wins.
+## Theory
 
-But open addressing introduces new problems. Deletion becomes tricky -- you cannot just empty a slot, or you will break the probe chain for other entries. Clustering means that groups of filled slots tend to grow, making probes longer. The load factor must stay lower than with chaining (typically below 0.7), or performance falls off a cliff. And resizing is the same O(n) cost, happening at a lower occupancy.
+### Load Factor: The Health Metric
 
-Understanding both chaining and open addressing -- their strengths, failure modes, and engineering trade-offs -- is what separates someone who USES hash tables from someone who UNDERSTANDS them.
-
-## Theory (40 min)
-
-### 1. Open Addressing: The Idea
-
-Instead of storing collisions in linked lists, we find another empty slot in the main array:
+The **load factor** (alpha) of a hash table is:
 
 ```
-  hash("alice") = 3
-  hash("charlie") = 3  -- collision!
-
-  Chaining:  slot 3 -> [alice] -> [charlie]  (linked list)
-  Open addr: slot 3 = [alice], slot 4 = [charlie]  (probe forward)
+alpha = n / m
 ```
 
-All entries live in the array itself. The array is both the index structure and the storage. This means the load factor can never exceed 1.0 (every slot holds at most one entry).
+where `n` = number of items stored and `m` = number of buckets.
 
-### 2. Linear Probing
+This single number tells you how crowded the table is:
 
-The simplest probing strategy: if slot h is taken, try h+1, h+2, h+3, ...
+| Load Factor | Meaning | Performance Impact |
+|-------------|---------|-------------------|
+| 0.0 | Empty table | Wasting memory |
+| 0.25 | Sparse | Fast but memory-inefficient |
+| 0.5 | Half full | Good balance |
+| 0.75 | Getting crowded | Sweet spot threshold |
+| 1.0 | Full (chaining) / impossible (open addressing) | Chains averaging 1 item each |
+| 2.0 | Overcrowded (chaining only) | Chains averaging 2 items each |
 
+### Why 0.75 Is the Magic Threshold
+
+For **chaining**, the expected chain length equals the load factor. If alpha = 0.75, the average chain has 0.75 items. This means:
+
+- **~75% of buckets** have exactly one item (or zero).
+- The probability of a collision on the next insert is approximately `1 - e^(-alpha)` which at alpha = 0.75 is about **0.53** — roughly a coin flip. But the expected chain length is still under 1.
+- At alpha = 1.0, every bucket has one item on average, but the **variance** means some chains are length 2-3, degrading cache performance.
+
+The 0.75 threshold balances:
+1. **Space**: only 33% overhead (m/n = 1/0.75 = 1.33 buckets per item).
+2. **Time**: expected probe/chain length stays near 1.
+3. **Collision probability**: ~25% chance that a given insert hits an occupied bucket (under uniform hashing, the probability that a specific bucket is occupied is n/m = 0.75, but for "any collision" the math uses the birthday problem approximation).
+
+For **open addressing**, the situation is worse. Expected probes = `1 / (1 - alpha)`. At alpha = 0.75, that is 4 probes. At alpha = 0.9, that is 10 probes. Open-addressing tables typically resize at lower thresholds (0.5-0.7).
+
+### Rehashing: The Expensive Necessity
+
+When the load factor exceeds the threshold, you must **rehash**:
+
+1. Allocate a new table with **2x** the number of buckets.
+2. For every item in the old table, compute `hash(key) % new_size` and insert it into the new table.
+3. Discard the old table.
+
+This is an **O(n)** operation — you touch every item. But it happens rarely enough that the cost is amortized.
+
+### Amortized O(1): The Accounting Argument
+
+Think of it like a piggy bank. Each regular O(1) insert "saves" a small constant of extra work. When a rehash happens (O(n) work), the savings accumulated over the previous n/2 inserts pay for it.
+
+Formally: if you double at every power of 2, inserting N items costs:
 ```
-  probe(key, i) = (hash(key) + i) % table_size
-
-  Insert "alice" -> hash=3, slot 3 empty, place at 3
-  Insert "charlie" -> hash=3, slot 3 taken, try 4, empty, place at 4
-  Insert "eve" -> hash=4, slot 4 taken, try 5, empty, place at 5
-
-  Table: [   ] [   ] [   ] [alice] [charlie] [eve] [   ] [   ]
-                             ^3       ^4       ^5
-```
-
-**The clustering problem**: Filled slots tend to form contiguous runs. A new key that hashes anywhere into a run must probe past the entire run. Longer runs attract more insertions, making them grow faster. This is **primary clustering**, and it degrades performance significantly as the table fills.
-
-At load factor 0.5 with linear probing, the average successful search examines about 1.5 slots. At 0.75, it examines about 2.5 slots. At 0.9, it examines about 5.5 slots. At 0.95, it examines about 10.5 slots. The curve is non-linear -- performance does not degrade gracefully.
-
-### 3. Quadratic Probing
-
-Instead of stepping by 1 each time, step by increasing amounts: try h+1, h+4, h+9, h+16, ...
-
-```
-  probe(key, i) = (hash(key) + i^2) % table_size
-```
-
-This breaks up primary clusters because entries that hash to the same initial slot spread out quickly. However, entries that hash to the SAME slot still follow the same probe sequence (secondary clustering).
-
-Caveat: quadratic probing is not guaranteed to visit every slot. It only visits all slots when table_size is prime and the table is less than half full. This is why many implementations use prime table sizes.
-
-### 4. Double Hashing
-
-Use a second hash function to determine the step size:
-
-```
-  probe(key, i) = (hash1(key) + i * hash2(key)) % table_size
-```
-
-Two keys that collide at the same slot will (with high probability) have different step sizes, so their probe sequences diverge immediately. This eliminates both primary and secondary clustering.
-
-The requirement: hash2(key) must never return 0 (infinite loop), and should be coprime with table_size. A common choice: `hash2(key) = prime - (hash(key) % prime)` where prime < table_size.
-
-### 5. The Deletion Problem: Tombstones
-
-With chaining, deletion is simple -- remove a node from the linked list. With open addressing, you CANNOT simply empty a slot:
-
-```
-  Insert "alice" at slot 3
-  Insert "charlie" at slot 3 -> probes to slot 4
-  Delete "alice" (empty slot 3)
-  Lookup "charlie": hash=3, slot 3 is empty -> "not found"!  WRONG.
+N regular inserts + (1 + 2 + 4 + 8 + ... + N) rehash work
+                  = N + (2N - 1) = 3N - 1
 ```
 
-The probe chain for "charlie" passes through slot 3. If we empty slot 3, the lookup stops early and misses "charlie".
+So the amortized cost per insert is **3N/N = 3 = O(1)**.
 
-**Solution: tombstones**. Instead of emptying the slot, mark it as DELETED. During lookup, DELETED slots are treated as occupied (keep probing). During insertion, DELETED slots can be reused.
+This only works because the table **doubles** (geometric growth). If you grew by a fixed amount (e.g., +100 buckets each time), the amortized cost would be O(n), not O(1). This is the same reason Python lists use geometric growth for `append`.
 
-The cost: tombstones degrade performance over time. A table with many tombstones has long probe chains even at low real load factors. Periodic compaction (rebuild the table without tombstones) is necessary.
+### Shrinking: The Forgotten Direction
 
-### 6. Resize: When and How
+Most tutorials only discuss growing. But if you insert 1 million items and then delete 999,999 of them, you are left with a table of 1 million+ buckets holding 1 item. That is a massive waste of memory.
 
-With open addressing, you MUST resize before the table is full (load factor < 1.0). In practice:
+**Shrink when the load factor drops below 0.25** (one quarter full). Why 0.25 and not 0.5?
 
-- Resize when load factor > 0.7 (common threshold)
-- Double the table size (or go to the next prime)
-- Rehash ALL entries -- both live entries and removing tombstones
+**Hysteresis**: if you shrink at 0.5 and the shrunken table has load factor 1.0 (since you halve the size), the very next insert triggers a grow. If the next operation is a delete, you shrink again. This **thrashing** — alternating grow/shrink — is O(n) per operation, destroying amortized performance.
 
-```
-  Before resize (capacity 8, 6 entries, LF = 0.75):
-  [ ] [A] [B] [X] [C] [D] [E] [ ]    (X = tombstone)
+By shrinking at 0.25, the shrunken table has load factor 0.5, which is far from both the grow threshold (0.75) and the shrink threshold (0.25). You need many inserts or deletes before the next resize. The gap between 0.25 and 0.75 is the hysteresis band.
 
-  After resize (capacity 16, 5 entries, LF = 0.3125):
-  [ ] [ ] [A] [ ] [C] [ ] [ ] [B] [ ] [D] [ ] [ ] [E] [ ] [ ] [ ]
-```
+### Incremental Rehashing: The Redis Approach
 
-Resize removes tombstones and redistributes entries for shorter probe chains. It is O(n) work but happens O(log n) times over n insertions, giving O(1) amortized cost.
+Standard rehashing is a **stop-the-world** operation. If your hash table has 10 million entries, rehashing pauses all operations while you move them. For a real-time system (database, cache server, game server), this latency spike is unacceptable.
 
-### 7. Python Dict Internals
+**Redis** solves this with **incremental rehashing**:
 
-Python's dict uses open addressing with a cleverly designed probe sequence:
+1. Maintain **two** hash tables: `ht[0]` (old) and `ht[1]` (new, 2x size).
+2. Set a migration index starting at bucket 0 of the old table.
+3. On every insert/lookup/delete operation, migrate **k entries** (typically 1-10 buckets) from the old table to the new table.
+4. New inserts always go into the new table.
+5. Lookups check both tables (new first, then old).
+6. When all old buckets are migrated, free the old table and swap.
 
-```python
-# Simplified Python dict probing (actual CPython code)
-perturb = hash_value
-index = perturb % table_size
-while table[index] is not EMPTY:
-    perturb >>= 5
-    index = (5 * index + perturb + 1) % table_size
-```
+**Trade-off**: each operation is slightly slower during migration (checking two tables, plus migration work), but no single operation is catastrophically slow. The worst-case latency is bounded by k, not n.
 
-The `perturb` variable starts as the full hash value and is shifted right each iteration. This means early probes depend on ALL bits of the hash (not just the low bits used for the initial index), giving excellent distribution. As perturb approaches zero, it degrades to a linear-like sequence that is guaranteed to visit every slot.
+### Table Size: Powers of 2 vs. Primes
 
-Python dicts also maintain insertion order (since 3.7) by using a separate compact array for the key-value pairs and an index array for the hash table itself. This is a space optimization: the index array holds only 1-byte or 4-byte indices instead of full key-value entries.
+**Powers of 2** (16, 32, 64, ...): `hash % m` becomes `hash & (m-1)` — a single bitwise AND, which is faster than modulo. But if the hash function has patterns in low bits, collisions cluster.
 
-### 8. Robin Hood Hashing
+**Primes** (17, 37, 79, ...): `hash % m` distributes more uniformly even with mediocre hash functions, because prime moduli break up patterns. But modulo is slower than bitwise AND.
 
-A clever refinement of linear probing: when inserting a new key, if the new key has traveled FURTHER from its ideal slot than the current occupant, SWAP them and continue inserting the displaced entry.
-
-```
-  Slot 3: "alice" (0 away from ideal slot 3)
-  Insert "charlie" (ideal slot 3, now 1 away at slot 4):
-    Slot 4: "bob" (0 away from ideal slot 4)
-    "charlie" has traveled 1, "bob" has traveled 0
-    Since 1 > 0, swap: put "charlie" at 4, continue inserting "bob"
-```
-
-This equalizes probe distances -- no entry is much farther from its ideal slot than any other. The variance of probe lengths drops dramatically, making worst-case lookups much better. Rust's standard HashMap used Robin Hood hashing before switching to Swiss Table.
-
-### 9. Consistent Hashing (Distributed Systems)
-
-When you have N servers and hash keys to servers with `hash(key) % N`, adding or removing a server remaps almost ALL keys. Consistent hashing arranges servers on a ring (hash them onto [0, 2^32)). A key maps to the first server clockwise from its position.
-
-```
-     0
-    / \
-  S3   S1    Key K hashes between S1 and S2
-  |     |    -> maps to S2
-  S2
-```
-
-Adding a server only remaps keys between it and its predecessor. Removing a server only remaps its keys to its successor. This is how DynamoDB, Cassandra, and consistent hash rings in load balancers work.
-
-## Practice (20 min)
-
-Work through `practice.py`. Implement open addressing with linear probing, handle tombstones for deletion, and measure how clustering affects probe chain lengths.
-
-## Daily Project
-
-Run `hash_table_open.py` to see a complete open addressing hash table with linear probing, quadratic probing, and double hashing. It measures probe chain lengths, demonstrates the clustering problem visually, shows tombstone degradation, and benchmarks against Python's dict. Study how different probing strategies handle the same data -- the difference in probe lengths is dramatic.
+Modern approach: use a good hash function (e.g., SipHash, used in Python 3.4+) and power-of-2 table sizes. The hash function handles distribution; the table size handles speed.
 
 ## Checkpoint Questions
 
-1. Why does linear probing suffer from clustering while double hashing does not? Draw what happens when five keys all hash to slot 3 under each strategy.
+1. **Why does doubling the table size give amortized O(1) inserts, but adding a fixed increment does not?** Think about the geometric series vs. arithmetic series of rehash costs.
 
-2. Why can the load factor never reach 1.0 with open addressing? What happens to lookup time as load factor approaches 1.0, and why is the degradation worse than with chaining?
+2. **If you set the shrink threshold at 0.5 instead of 0.25, what specific sequence of operations causes O(n) amortized cost per operation?** Construct the adversarial sequence.
 
-3. A hash table uses tombstones for deletion. After 1 million insertions and 999,990 deletions, the table has only 10 live entries but 999,990 tombstones. What is the performance like? How do you fix this?
+3. **During Redis-style incremental rehashing, why must new inserts go into the new table rather than the old one?** What would go wrong if you inserted into the old table?
 
-4. Python's dict probe sequence uses `perturb >>= 5` to shift the perturbation. Why use all bits of the hash instead of just the low bits? Give an example of data that would cause problems with only low-bit probing.
+4. **A hash table uses open addressing with load factor threshold 0.7. After inserting 70 items into 100 slots, a rehash occurs. What is the load factor immediately after rehashing?** (Assume new size is 200.)
 
-5. In consistent hashing, why do systems use "virtual nodes" (multiple hash positions per server)? What problem does this solve? (Hint: what happens when servers have different capacities, or when you only have 3 servers?)
+5. **You have a hash table with 1 million entries and need to rehash. Your system has a 10ms latency budget per operation. If each entry takes 100ns to migrate, can you do a full rehash in one operation? How would you structure incremental rehashing to meet the latency budget?**
+
+6. **Why do most hash table implementations use a minimum table size (e.g., 8 or 16) and never shrink below it?** What would happen if you allowed the table to shrink to size 1?

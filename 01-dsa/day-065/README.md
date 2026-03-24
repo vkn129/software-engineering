@@ -1,150 +1,132 @@
-# Day 13: Hash Tables Part 1 -- Hash Functions and Chaining
+# Day 65: Hash Table Collision Resolution
 
-## Why This Exists
+## Why This Matters
 
-The hash table is the single most important data structure in practical programming. Databases use them for indexes. Compilers use them for symbol tables. Caches are hash tables. Sets are hash tables. Every time you write `dict[key] = value` in Python, `map[key] = value` in Go, or `HashMap.put(key, value)` in Java, you are using a hash table. If you understand one data structure deeply, make it this one.
+Day 13 built hash tables with separate chaining. Now we confront the full design space: **chaining vs open addressing**. Every production hash table picks one of these families, and the choice determines memory layout, cache behavior, deletion complexity, and failure modes under load. Python's `dict` uses open addressing. Java's `HashMap` uses chaining. Rust's `HashMap` uses Robin Hood hashing. Understanding why requires understanding the trade-offs at the hardware level.
 
-The core promise is extraordinary: O(1) average-case lookup, insertion, and deletion. Arrays give you O(1) access by index, but only if you KNOW the index. Hash tables give you O(1) access by ANY key -- a string, a tuple, an object. They achieve this by converting arbitrary keys into array indices using a hash function, which is one of the most elegant ideas in computer science.
+## Two Collision Strategies
 
-But the promise has a dark side. The birthday paradox guarantees that collisions -- two different keys mapping to the same index -- happen far sooner than intuition suggests. With only 23 people in a room, there is a 50% chance two share a birthday. With a hash table of 1000 slots, you only need about 38 insertions before a collision is more likely than not. How you handle collisions determines whether your O(1) promise holds or degrades to O(n).
+### 1. Chaining (Separate Chaining)
 
-Real-world failures from hash table misunderstanding are common. In 2011, a hash collision attack (HashDoS) was disclosed against PHP, Python, Java, Ruby, and ASP.NET. Attackers crafted inputs that all hashed to the same bucket, turning O(1) lookups into O(n) and taking down web servers with a single request. Python 3.3+ added hash randomization specifically to prevent this. Understanding hash tables is understanding both their power and their failure modes.
-
-## Theory (40 min)
-
-### 1. The Core Idea
-
-Given a key (any type), we want to:
-1. Compute an integer from the key: `h = hash(key)` -- the hash function
-2. Map that integer to an array index: `index = h % table_size`
-3. Store/retrieve the value at that index
+Each bucket holds a linked list of all entries that hash to that index.
 
 ```
-  key "alice" --hash--> 7823491 --mod 8--> 3
-  key "bob"   --hash--> 2940182 --mod 8--> 6
-
-  Index:  0     1     2     3         4     5     6       7
-  Array: [   ] [   ] [   ] ["alice"] [   ] [   ] ["bob"] [   ]
+Bucket 0: -> (k3, v3) -> (k7, v7) -> None
+Bucket 1: -> (k1, v1) -> None
+Bucket 2: -> None
+Bucket 3: -> (k9, v9) -> (k4, v4) -> (k2, v2) -> None
 ```
 
-If every key maps to a unique index, we get O(1) everything. The problem is that the number of possible keys is infinite, but the array size is finite. Collisions are mathematically inevitable.
+**How it works:**
+- **Insert**: Hash the key, append to the list at that bucket. O(1) always — you never run out of space in the bucket, you just extend the chain.
+- **Search**: Hash the key, walk the list comparing keys. O(chain length).
+- **Delete**: Hash the key, find and unlink from the list. Standard linked list removal.
 
-### 2. What Makes a Good Hash Function
+**Trade-offs:**
+- Insert **never degrades** — you always just append to a list, regardless of load factor. Even at load factor 10.0, insert is O(1).
+- Wastes memory on **pointers** — each node needs a `next` pointer (8 bytes on 64-bit systems). For small key-value pairs (e.g., two ints = 8 bytes), the pointer overhead doubles memory usage.
+- **Poor cache locality** — following linked list pointers causes cache misses. Each node can live anywhere in the heap. Walking a chain of length 5 can mean 5 cache misses at ~100 cycles each = 500 cycles, vs 5 sequential reads at ~4 cycles each = 20 cycles.
+- Load factor can exceed 1.0 — chains just get longer. The table never "fills up."
 
-A hash function must satisfy:
-- **Deterministic**: Same key always produces the same hash
-- **Uniform distribution**: Keys should spread evenly across the output space
-- **Avalanche effect**: A small change in input causes a large change in output
+### 2. Open Addressing
 
-```
-  "cat" -> 8372193  (change one letter...)
-  "bat" -> 1950274  (completely different hash -- good!)
+All entries live directly in the table array. No pointers, no linked lists. When a collision occurs, you **probe** for the next available slot using a deterministic sequence.
 
-  Bad hash: "cat" -> 3, "bat" -> 4  (predictable, linear -- attackable)
-```
-
-**Why uniform distribution matters**: If 80% of keys hash to 20% of buckets, those buckets become long chains and performance degrades. A good hash function makes this astronomically unlikely.
-
-**Why avalanche matters**: If similar keys hash to similar values, real-world data (which is often clustered) will cause clustering in the table. The hash function must destroy any patterns in the input.
-
-### 3. Hash Functions in Practice
-
-**For integers**: Multiply by a large prime, then take modulo. Or use bit-mixing operations (shift, XOR, multiply) to spread bits around.
-
-```python
-def hash_int(key, table_size):
-    # Knuth's multiplicative hash
-    # The golden ratio constant spreads bits well
-    A = 2654435769  # 2^32 / phi, truncated
-    return ((key * A) >> 16) % table_size
-```
-
-**For strings**: Process each character, combining them in a way that depends on position (so "abc" != "bca").
-
-```python
-def hash_string(key, table_size):
-    h = 0
-    for char in key:
-        h = h * 31 + ord(char)  # 31 is prime, used by Java
-    return h % table_size
-```
-
-Why 31? It is prime (reduces collision patterns), it is one less than a power of 2 (so `h * 31 = h * 32 - h = (h << 5) - h`, which is fast), and empirically it distributes well for natural language strings.
-
-**Python's hash()**: Uses SipHash (since 3.4), a cryptographic-strength hash that prevents collision attacks. It includes a random seed generated at interpreter startup, so `hash("hello")` gives different values in different Python sessions.
-
-### 4. The Birthday Paradox and Collisions
-
-In a room of n people, the probability of a birthday collision exceeds 50% when n ~ 23 (for 365 days). Generalizing: for a hash table of size m, expect the first collision after roughly sqrt(pi * m / 2) insertions.
-
-For a table of 1000 slots: first collision around insertion 39. For a table of 1,000,000 slots: first collision around insertion 1,177. Collisions are NOT edge cases -- they are the common case.
-
-This is why collision resolution is not optional. It is the heart of hash table design.
-
-### 5. Chaining (Separate Chaining)
-
-The simplest collision resolution: each bucket holds a linked list of all entries that hash to that index.
+#### Linear Probing
+Probe sequence: `h(k), h(k)+1, h(k)+2, ...`
 
 ```
-  Index 0: -> ("eve", 30) -> None
-  Index 1: -> None
-  Index 2: -> ("alice", 25) -> ("charlie", 35) -> None
-  Index 3: -> ("bob", 28) -> None
-  Index 4: -> None
-  ...
+Insert key with h(k) = 3, but slot 3 is occupied:
+  Try slot 4 -> occupied
+  Try slot 5 -> empty, insert here
 ```
 
-**Lookup**: Hash the key, go to that bucket, walk the linked list comparing keys. Average chain length = n/m (load factor), so average lookup is O(1 + n/m).
+- **Best cache locality** — sequential memory access, CPU prefetcher loads the next cache line before you need it.
+- **Primary clustering** — occupied slots form long contiguous runs. A new key hashing anywhere into a cluster extends it. A cluster of size `s` has probability `(s+1)/m` of growing by 1 on the next insert. Clusters grow quadratically — this is the fundamental weakness.
 
-**Insert**: Hash the key, walk the chain to check for duplicates, insert at the head (O(1) if no duplicate check needed).
+#### Quadratic Probing
+Probe sequence: `h(k), h(k)+1^2, h(k)+2^2, h(k)+3^2, ...`
 
-**Delete**: Hash the key, walk the chain, remove the node. O(1 + n/m) average.
+- Eliminates primary clustering — probes jump further apart, so hitting a cluster does not extend it linearly.
+- Introduces **secondary clustering** — keys with the same hash still follow the same probe sequence, creating subtler clustering.
+- Does **not** guarantee visiting all slots unless table size is prime and load factor < 0.5.
 
-### 6. Load Factor
+#### Double Hashing
+Probe sequence: `h1(k), h1(k)+h2(k), h1(k)+2*h2(k), ...`
 
-The load factor alpha = n/m (number of entries / number of buckets) determines performance.
+- Second hash function `h2(k)` determines step size, unique per key.
+- Virtually eliminates all clustering — even keys with the same primary hash follow different probe sequences.
+- `h2(k)` must never return 0 (infinite loop). Common choice: `h2(k) = prime - (k % prime)` where `prime < table_size`.
+- Slightly worse cache performance than linear probing due to non-sequential memory access.
 
-- alpha < 1: Most buckets have 0 or 1 entries. Fast.
-- alpha = 1: On average, each bucket has 1 entry. Still OK.
-- alpha = 2: Average chain length is 2. Slowing down.
-- alpha = 10: Average chain length is 10. Now it is a linked list with extra steps.
+## The Clustering Problem in Linear Probing
 
-With chaining, the hash table still WORKS at any load factor -- it just gets slower. Most implementations resize (double the array) when alpha exceeds a threshold (commonly 0.75 for Java's HashMap, ~0.67 for Python's dict).
+Linear probing's primary clustering is a feedback loop:
 
-### 7. Resize Operation
+1. A contiguous block of occupied slots (a "cluster") forms by chance.
+2. Any new key whose hash lands **anywhere in the cluster, or at the slot just before it**, extends the cluster by one.
+3. A bigger cluster captures a larger fraction of the hash space, so it grows even faster.
+4. Two nearby clusters can merge into one giant cluster, making things dramatically worse.
 
-When load factor exceeds the threshold:
-1. Allocate a new array, typically 2x the size
-2. Rehash every existing entry (because `h % new_size != h % old_size`)
-3. Insert all entries into the new array
+The math: at load factor alpha, the expected number of probes for an unsuccessful search under linear probing is approximately `0.5 * (1 + 1/(1 - alpha)^2)`. At alpha = 0.9, that is ~50 probes. Under double hashing, it is `1/(1 - alpha)` = ~10 probes. The squared term in linear probing's formula is the clustering penalty.
 
-This is O(n) work, but it happens infrequently. Amortized over all insertions, each insertion is still O(1). Same amortization argument as dynamic arrays.
+## Tombstones for Deletion in Open Addressing
 
-### 8. Why Hash Tables Power Everything
+Deleting in open addressing is tricky. You cannot simply empty a slot — it would break the probe chain for keys inserted past that slot.
 
-- **Python dict / set**: Hash table with open addressing (Day 14)
-- **Database indexes**: Hash indexes for equality lookups (O(1) vs. B-tree O(log n))
-- **Caches (memcached, Redis)**: Distributed hash tables
-- **Compilers**: Symbol tables mapping variable names to types/locations
-- **Network routing**: IP address lookup tables
-- **Deduplication**: Seen-set for detecting duplicates in streams
+**Tombstone approach:**
+- Mark deleted slots with a sentinel value (`DELETED` / `TOMBSTONE`).
+- **Search** treats tombstones as "occupied, keep probing."
+- **Insert** can reuse tombstone slots (first tombstone in the probe sequence).
+- Problem: tombstones accumulate and never reduce probe lengths. A table that has seen many insert/delete cycles can have O(n) probes even at low actual load factor.
+- Solution: periodic rehashing to clear tombstones, or resize triggers that count tombstones.
 
-## Practice (20 min)
+**Backward shift deletion (tombstone-free):**
+- When deleting key at slot `i`, check if the next slot's key "belongs" at or before slot `i`.
+- If yes, shift it back. Continue shifting until you hit an empty slot or a key that is already in its home position.
+- No tombstones, no degradation over time, but more complex to implement correctly.
 
-Work through `practice.py`. Build hash functions, analyze their collision behavior, and understand why distribution quality matters. Implement chaining collision resolution.
+## Load Factor Analysis
 
-## Daily Project
+| Load Factor | Linear Probing (avg probes) | Double Hashing (avg probes) | Chaining (avg chain) |
+|-------------|----------------------------|-----------------------------|----------------------|
+| 0.25        | ~1.17                      | ~1.15                       | 0.25                 |
+| 0.50        | ~1.50                      | ~1.39                       | 0.50                 |
+| 0.75        | ~2.50                      | ~1.85                       | 0.75                 |
+| 0.90        | ~5.50                      | ~2.56                       | 0.90                 |
+| 0.95        | ~10.50                     | ~3.15                       | 0.95                 |
 
-Run `hash_table_chaining.py` to see a complete hash table built from scratch with separate chaining. It includes collision statistics, load factor monitoring, automatic resizing, and benchmarks against Python's built-in dict. Study how collisions increase with load factor and how resize keeps performance bounded.
+Key insight: chaining degrades **linearly** with load factor. Open addressing degrades **hyperbolically** — it hits a wall as alpha approaches 1.0. This is why open addressing implementations must resize aggressively (typically at alpha = 0.5 to 0.75) while chaining can tolerate higher load factors.
+
+## When to Use Which
+
+| Property                | Chaining              | Open Addressing          |
+|-------------------------|-----------------------|--------------------------|
+| Cache performance       | Poor (pointer chasing)| Excellent (sequential)   |
+| Memory overhead         | High (pointers/nodes) | Low (inline storage)     |
+| Max load factor         | Can exceed 1.0        | Must stay well below 1.0 |
+| Deletion complexity     | Simple (unlink node)  | Complex (tombstones/shift)|
+| Worst-case insert       | O(1) always           | O(n) when nearly full    |
+| Implementation          | Simpler               | More subtle edge cases   |
+| Best for                | Unknown/variable load | Known, controlled load   |
+
+**Real-world choices:**
+- **Python `dict`**: open addressing with perturbation-based probing
+- **Java `HashMap`**: chaining (with tree-ification at chain length 8)
+- **Go `map`**: chaining with 8-entry inline buckets (bucket fits a cache line)
+- **Rust `HashMap`**: Swiss Table / Robin Hood hashing (open addressing)
+- **C++ `std::unordered_map`**: chaining (standard requires it)
 
 ## Checkpoint Questions
 
-1. Why does Python randomize hash seeds between interpreter sessions? What attack does this prevent, and why was it serious enough to change the language?
+1. **Why does linear probing suffer from primary clustering but double hashing does not?** Linear probing uses a fixed step of 1 for all keys, so any key landing in a contiguous block extends that block. Double hashing uses a key-dependent step size from a second hash function, so different keys follow different probe sequences even when they collide, breaking the clustering feedback loop.
 
-2. If you have a hash table with 1000 buckets and you insert 500 keys with a perfect hash function, how many collisions do you expect? (Hint: birthday paradox formula.)
+2. **Why can't you simply set a slot to empty when deleting in open addressing?** A key may have been inserted past that slot during its own probe sequence. Emptying the slot breaks the probe chain — future searches for that key would stop at the empty slot and incorrectly report "not found."
 
-3. The load factor threshold for resize is a trade-off. What happens if you set it too low (e.g., 0.1)? Too high (e.g., 5.0)? What is being traded?
+3. **At load factor 0.9, linear probing averages ~5.5 probes while chaining averages 0.9 comparisons per lookup. Why might linear probing still be faster in wall-clock time?** Cache locality. Linear probing reads sequential memory addresses that fit in cache lines (L1 hit ~4 cycles). Chaining follows heap pointers where each dereference is likely a cache miss (~100 cycles). Five sequential hits (20 cycles) beat one cache miss (100 cycles).
 
-4. Why does rehashing require recomputing every entry's position, not just the entries in overloaded buckets? What would go wrong if you skipped this?
+4. **What is the fundamental problem with tombstones, and how does backward shift deletion solve it?** Tombstones permanently inflate probe lengths — they say "keep searching" even when nothing useful is ahead. Over many insert/delete cycles, tombstones accumulate and degrade all lookups. Backward shift deletion physically moves entries to fill gaps, keeping probe chains minimal without sentinel markers.
 
-5. Could you use a hash table to implement a sorted data structure (e.g., iterate keys in order)? Why or why not? What does this tell you about when to use a hash table vs. a balanced BST?
+5. **Why must the table size and `h2(k)` be coprime in double hashing?** If they share a common factor `d`, the probe sequence cycles through only `m/d` slots instead of all `m` — it never visits most of the table. Making the table size prime and ensuring `h2(k) > 0` guarantees full coverage.
+
+6. **Robin Hood hashing keeps the same average probe length as standard linear probing but reduces variance. Why does lower variance matter in practice?** Lower variance means no single lookup is catastrophically slow. The expected maximum probe length drops from O(log n) to O(log log n). This matters for latency-sensitive systems where tail latency (p99, p999) determines user experience — you want predictable performance, not just good average performance.

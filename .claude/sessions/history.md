@@ -1615,3 +1615,25 @@ Here's where we stand:
 | **Phase 6**: Graph Algorith ...
 
 
+---
+## Session d260a710 — 2026-03-31 (16:21 to 16:22 UTC)
+
+**Files touched:** `.claude/sessions/history.md`, `01-dsa/day-078/README.md`
+
+### 16:21 — User
+resume
+
+### 16:22 — Claude
+Here's where we stand on your DSA learning path:
+
+## DSA Progress — Phase 6: Graph Algorithms (Days 78-91)
+
+| Day | Topic | README | Implementation | Practice |
+|-----|-------|--------|---------------|----------|
+| 78 | Graph Representations | done | done | done |
+| 79 | BFS | done | done | done |
+| 80 | DFS | done | done | done |
+| 81 | Topological Sort | done | done | done |
+| 82 | Dijkstra | do ...
+
+

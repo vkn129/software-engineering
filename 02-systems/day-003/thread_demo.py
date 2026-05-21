@@ -13,8 +13,6 @@ Run:  python thread_demo.py
 
 import threading
 import time
-import urllib.request
-import hashlib
 import sys
 
 
@@ -33,12 +31,19 @@ import sys
 # With 100 threads × 100_000 increments we expect 10_000_000; we will see less.
 
 def race_demo(n_threads: int = 100, increments_per_thread: int = 100_000) -> int:
-    counter = 0  # shared, unprotected
+    # Use a list so threads share a mutable container — clearer than nonlocal.
+    # The race: LOAD counter[0], ADD 1, STORE counter[0].
+    # Between LOAD and STORE another thread can do the same — one write is lost.
+    # We use sys.setswitchinterval(0) to force the GIL to yield as often as
+    # possible, making the race observable. (Default is 5ms — sometimes the
+    # entire inner loop finishes before a switch, masking the race.)
+    counter = [0]
+    original_interval = sys.getswitchinterval()
+    sys.setswitchinterval(1e-9)  # near-zero: switch after every bytecode check
 
     def worker():
-        nonlocal counter
         for _ in range(increments_per_thread):
-            counter += 1  # ← NOT thread-safe
+            counter[0] += 1  # ← NOT thread-safe: LOAD, ADD, STORE can interleave
 
     threads = [threading.Thread(target=worker) for _ in range(n_threads)]
     for t in threads:
@@ -46,7 +51,8 @@ def race_demo(n_threads: int = 100, increments_per_thread: int = 100_000) -> int
     for t in threads:
         t.join()
 
-    return counter
+    sys.setswitchinterval(original_interval)  # restore
+    return counter[0]
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -156,7 +162,7 @@ def main() -> None:
     print("THREAD DEMO: Race Conditions, Locks, and the GIL")
     print("=" * 65)
 
-    N_THREADS = 50
+    N_THREADS = 100
     INCREMENTS = 100_000
     EXPECTED = N_THREADS * INCREMENTS
 
@@ -179,10 +185,11 @@ def main() -> None:
 
     # ── Part 2: Lock Fix ─────────────────────────────────────────────────
     print(f"\n[2] LOCK-PROTECTED COUNTER  ({N_THREADS} threads × {INCREMENTS:,} increments)")
-    result = locked_demo(N_THREADS, INCREMENTS)
+    result = locked_demo(N_THREADS, INCREMENTS // 10)  # fewer iterations for speed
+    locked_expected = N_THREADS * (INCREMENTS // 10)
     print(f"    Result:   {result:,}")
-    print(f"    Expected: {EXPECTED:,}")
-    print(f"    Correct:  {result == EXPECTED}")
+    print(f"    Expected: {locked_expected:,}")
+    print(f"    Correct:  {result == locked_expected}")
     print(f"    Cost:     each increment now serializes all {N_THREADS} threads")
 
     # ── Part 3: CPU-Bound GIL Effect ────────────────────────────────────

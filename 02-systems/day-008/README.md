@@ -90,9 +90,31 @@ Each step costs at least one disk seek (inode read) + one block read (directory 
 
 **Symbolic link:** a separate inode of type `symlink` whose data block contains the target path string. Every access through a symlink re-resolves the target path. Symlinks can cross filesystems, can point to directories, can be dangling (pointing to a nonexistent target). They add at least one extra inode lookup per path component.
 
+## Implementation
+
+Run `fs_sim.py` to see a working in-memory inode-based filesystem:
+
+```bash
+python fs_sim.py
+```
+
+It exercises every code path: `mkfs`, `mkdir`, `create`, `write`, `read`, `link`, `unlink`, path resolution through `resolve("/a/b/c")`, and a final `stats()` dump. Writing a 1 KB file into a filesystem with 64-byte blocks and 12 direct pointers forces allocation through the single-indirect block — you can see `Indirect block allocated: True` in the output.
+
+Key design decisions in `fs_sim.py`:
+- `BLOCK_SIZE = 64` bytes (tiny) so indirect blocks fire after just 768 bytes, making the pointer logic exercisable with small inputs.
+- `_get_block_num(inode, logical_blk, allocate=True)` is the heart of the pointer tree — it handles direct and single-indirect transparently.
+- Directory entries are packed binary structs (`struct.pack`), mirroring how ext2 stores them on disk.
+- The free-block bitmap is a simple Python list of booleans — a real filesystem packs 8 bits per byte.
+
 ## Practice
 
 Work through `practice.py`. Five exercises with TODO slots and full solutions below each. Complete the TODO before reading the solution.
+
+- **Exercise 1**: Implement symbolic links (store target path in inode data) and demonstrate a dangling link after unlinking the target.
+- **Exercise 2**: Derive the max file size formula given block size, pointer size, and indirection levels. Verify by writing exactly max bytes and then one more.
+- **Exercise 3**: Create/delete files in a checkerboard pattern to produce fragmentation; confirm a new large file allocates non-contiguous blocks yet reads correctly.
+- **Exercise 4**: Step through hard-link refcount semantics: watch `nlink` decrement on each `unlink` and confirm blocks are freed only when it hits 0.
+- **Exercise 5**: Implement recursive `du` that correctly skips hard-link duplicates by tracking visited inums.
 
 ## Checkpoint Questions
 

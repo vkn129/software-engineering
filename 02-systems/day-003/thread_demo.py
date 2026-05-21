@@ -19,31 +19,35 @@ import sys
 # ─────────────────────────────────────────────────────────────────────────────
 # PART 1: The Race Condition
 # ─────────────────────────────────────────────────────────────────────────────
-# counter += 1  compiles to three bytecode instructions:
-#   LOAD_FAST counter      ← read current value into the eval stack
-#   LOAD_CONST 1
-#   BINARY_ADD             ← compute result
-#   STORE_FAST counter     ← write result back
+# The canonical race: read–modify–write on shared state without a lock.
 #
-# Between LOAD and STORE the OS can preempt this thread and let another thread
-# run its own LOAD. Both load the same old value, both add 1, both store.
-# One increment is silently lost.
-# With 100 threads × 100_000 increments we expect 10_000_000; we will see less.
+#   Thread A reads counter (gets 5)
+#   ← preempted here (time.sleep(0) forces a GIL yield) →
+#   Thread B reads counter (gets 5, same stale value)
+#   Thread B writes counter = 6
+#   Thread A writes counter = 6   ← overwrites B's write, one increment lost
+#
+# In CPython, `counter += 1` often completes between GIL switch points for
+# simple types because the bytecodes execute quickly. We make the race
+# *reliably* visible by splitting read and write with time.sleep(0), which
+# forces a GIL release between the load and store — exactly the window
+# where another thread can preempt and overwrite.
+#
+# This is pedagogically honest: in production, the sleep is replaced by any
+# operation that causes a thread switch (I/O, function calls, enough bytecodes).
 
-def race_demo(n_threads: int = 100, increments_per_thread: int = 100_000) -> int:
-    # Use a list so threads share a mutable container — clearer than nonlocal.
-    # The race: LOAD counter[0], ADD 1, STORE counter[0].
-    # Between LOAD and STORE another thread can do the same — one write is lost.
-    # We use sys.setswitchinterval(0) to force the GIL to yield as often as
-    # possible, making the race observable. (Default is 5ms — sometimes the
-    # entire inner loop finishes before a switch, masking the race.)
-    counter = [0]
-    original_interval = sys.getswitchinterval()
-    sys.setswitchinterval(1e-9)  # near-zero: switch after every bytecode check
+def race_demo(n_threads: int = 20, increments_per_thread: int = 50) -> int:
+    counter = [0]  # shared mutable state — list so all threads see same object
 
     def worker():
         for _ in range(increments_per_thread):
-            counter[0] += 1  # ← NOT thread-safe: LOAD, ADD, STORE can interleave
+            # Explicit read–modify–write with a yield in between.
+            # time.sleep(0) releases the GIL immediately, letting another
+            # thread run. That thread reads the same stale value and will
+            # overwrite our result when we store.
+            current = counter[0]   # LOAD
+            time.sleep(0)          # ← yield here — the race window opens
+            counter[0] = current + 1  # STORE (may overwrite another thread's write)
 
     threads = [threading.Thread(target=worker) for _ in range(n_threads)]
     for t in threads:
@@ -51,7 +55,6 @@ def race_demo(n_threads: int = 100, increments_per_thread: int = 100_000) -> int
     for t in threads:
         t.join()
 
-    sys.setswitchinterval(original_interval)  # restore
     return counter[0]
 
 
@@ -62,21 +65,25 @@ def race_demo(n_threads: int = 100, increments_per_thread: int = 100_000) -> int
 # acquire() blocks until the lock is free; release() frees it.
 # With "with lock:" we guarantee release even if an exception occurs.
 #
-# The lock makes the read–modify–write atomic from the perspective of other
-# threads: only one thread executes the body at a time, so no interleaving
-# can corrupt the counter. Cost: threads spend most of their time waiting
-# on the lock rather than doing work — which is why this is slower than
-# single-threaded code for a pure-CPU task.
+# The lock makes the entire read–modify–write atomic: only one thread can
+# hold the lock at a time, so no interleaving can corrupt the counter.
+# The yield (sleep(0)) inside the lock still happens, but it doesn't matter —
+# other threads block on lock.acquire() until we release, so they cannot
+# read or write counter while we hold the lock.
 
-def locked_demo(n_threads: int = 100, increments_per_thread: int = 100_000) -> int:
-    counter = 0
+def locked_demo(n_threads: int = 20, increments_per_thread: int = 50) -> int:
+    counter = [0]
     lock = threading.Lock()
 
     def worker():
-        nonlocal counter
         for _ in range(increments_per_thread):
             with lock:
-                counter += 1  # ← now atomic w.r.t. other threads
+                # The entire read–modify–write is now protected.
+                # Even with sleep(0) inside the lock, other threads block
+                # on lock.acquire() — they cannot see a stale value.
+                current = counter[0]
+                time.sleep(0)          # ← still yields, but lock protects us
+                counter[0] = current + 1
 
     threads = [threading.Thread(target=worker) for _ in range(n_threads)]
     for t in threads:
@@ -84,7 +91,7 @@ def locked_demo(n_threads: int = 100, increments_per_thread: int = 100_000) -> i
     for t in threads:
         t.join()
 
-    return counter
+    return counter[0]
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -162,35 +169,33 @@ def main() -> None:
     print("THREAD DEMO: Race Conditions, Locks, and the GIL")
     print("=" * 65)
 
-    N_THREADS = 100
-    INCREMENTS = 100_000
+    N_THREADS = 20
+    INCREMENTS = 50
     EXPECTED = N_THREADS * INCREMENTS
 
     # ── Part 1: Race Condition ────────────────────────────────────────────
-    print(f"\n[1] RACE CONDITION  ({N_THREADS} threads × {INCREMENTS:,} increments)")
-    print(f"    Expected: {EXPECTED:,}")
+    print(f"\n[1] RACE CONDITION  ({N_THREADS} threads × {INCREMENTS} increments)")
+    print(f"    Expected: {EXPECTED}")
+    print(f"    (Using sleep(0) between read and write to make the race visible)")
 
-    results = []
     for run in range(3):
         result = race_demo(N_THREADS, INCREMENTS)
-        results.append(result)
         lost = EXPECTED - result
         pct = lost / EXPECTED * 100
-        print(f"    Run {run + 1}: {result:,}  (lost {lost:,} increments = {pct:.1f}% loss)")
+        print(f"    Run {run + 1}: {result}  (lost {lost} increments = {pct:.0f}% loss)")
 
-    print(f"\n    Note: results differ between runs (non-deterministic)")
+    print(f"\n    Note: results vary between runs (non-deterministic scheduling)")
     print(f"    Note: result is always LESS than expected (never more)")
-    print(f"    Why: STORE from one thread overwrites STORE from another,")
-    print(f"    so some increments are silently dropped — never doubled.")
+    print(f"    Why: STORE from one thread overwrites another thread's STORE,")
+    print(f"    so increments are silently dropped — never doubled.")
 
     # ── Part 2: Lock Fix ─────────────────────────────────────────────────
-    print(f"\n[2] LOCK-PROTECTED COUNTER  ({N_THREADS} threads × {INCREMENTS:,} increments)")
-    result = locked_demo(N_THREADS, INCREMENTS // 10)  # fewer iterations for speed
-    locked_expected = N_THREADS * (INCREMENTS // 10)
-    print(f"    Result:   {result:,}")
-    print(f"    Expected: {locked_expected:,}")
-    print(f"    Correct:  {result == locked_expected}")
-    print(f"    Cost:     each increment now serializes all {N_THREADS} threads")
+    print(f"\n[2] LOCK-PROTECTED COUNTER  ({N_THREADS} threads × {INCREMENTS} increments)")
+    result = locked_demo(N_THREADS, INCREMENTS)
+    print(f"    Result:   {result}")
+    print(f"    Expected: {EXPECTED}")
+    print(f"    Correct:  {result == EXPECTED}")
+    print(f"    Why: with lock, only one thread can do read-modify-write at a time")
 
     # ── Part 3: CPU-Bound GIL Effect ────────────────────────────────────
     print(f"\n[3] GIL EFFECT — CPU-BOUND WORK")

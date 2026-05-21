@@ -703,10 +703,11 @@ def cfs_schedule(tasks: List[CFSTask], min_granularity: int = 1) -> Dict[str, in
 
 def solution5() -> None:
     print("\n[Solution 5] CFS-style Scheduler")
+    # Equal bursts so all tasks run to completion together — CPU% ≈ weight%
     tasks = [
-        CFSTask("NORMAL",  arrival=0, burst=20, nice=0),
-        CFSTask("NICE5",   arrival=0, burst=20, nice=5),
-        CFSTask("NICE_10", arrival=0, burst=10, nice=-5),
+        CFSTask("NORMAL",  arrival=0, burst=50, nice=0),
+        CFSTask("NICE5",   arrival=0, burst=50, nice=5),
+        CFSTask("NICE_10", arrival=0, burst=50, nice=-5),
     ]
 
     cpu_received = cfs_schedule(tasks, min_granularity=1)
@@ -722,10 +723,11 @@ def solution5() -> None:
         expected_pct = t.weight / total_weight * 100
         print(f"  {t.id:<10} {t.nice:>6} {t.weight:>8.1f} {cpu_received[t.id]:>10} {actual_pct:>7.1f}% {expected_pct:>11.1f}%")
 
-    print("\n  Observation: CPU shares are proportional to task weights.")
-    print("  Nice=-5 gets more CPU, nice=+5 gets less — by exact weight ratios.")
-    print("  This is 'completely fair': every task advances vruntime at the same rate.")
+    print("\n  Observation: CPU shares converge to weight-proportional allocation.")
+    print("  NICE_10 (nice=-5, weight=3125) dominates; NICE5 (weight=335) gets the least.")
+    print("  Actual % ≈ Expected % because all tasks have the same burst length.")
     print("  CFS uses a red-black tree (O(log n)) to pick the leftmost task efficiently.")
+    print("  vruntime ensures: high-weight tasks advance vruntime slowly → selected more often.")
 
 
 # -----------------------------------------------------------

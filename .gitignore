@@ -14,3 +14,8 @@ node_modules/
 # IDE
 .vscode/
 .idea/
+
+# Agent/session scratch — worktrees are full repo copies (~35MB), never commit them
+.claude/worktrees/
+.claude/.headroom_wrap_marker.json
+.tokensave/
